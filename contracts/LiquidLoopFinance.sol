@@ -1,95 +1,121 @@
-1e8 decimals
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+/**
+ * @title LiquidLoop Finance
+ * @notice A yield-looping DeFi contract where users can deposit tokens and earn rewards which automatically compound in a loop.
+ * @dev Works with any ERC20 token. Interest rate is applied per compounding cycle.
+ */
+
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
 }
 
 contract LiquidLoopFinance {
-    STRUCTS
-    -------------------------------------------------------
-    -------------------------------------------------------
-    IERC20 public immutable collateralToken; e.g., USDC/DAI
+    IERC20 public stakingToken;
+    address public admin;
+    uint256 public interestRate;     // e.g. 500 = 5% (two decimals)
+    uint256 public compoundInterval; // seconds per compounding cycle
 
-    IPriceOracle public oracle;
+    struct UserInfo {
+        uint256 deposited;
+        uint256 lastCompound;
+    }
 
-    uint256 public constant MAX_LOAN_TO_VALUE = 70_000;  80%
-    uint256 public constant PRECISION = 1e5;
+    mapping(address => UserInfo) public users;
 
-    mapping(address => Position) public positions;
+    event Deposited(address indexed user, uint256 amount);
+    event Compounded(address indexed user, uint256 reward);
+    event Withdrawn(address indexed user, uint256 amount);
+    event UpdatedIR(uint256 newRate);
 
-    address public owner;
-
-    EVENTS
-    -------------------------------------------------------
-    -------------------------------------------------------
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Not owner");
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Not authorized");
         _;
     }
 
-    modifier positionExists() {
-        require(positions[msg.sender].exists, "No position");
-        _;
+    constructor(
+        address _token,
+        uint256 _interestRate,
+        uint256 _compoundInterval
+    ) {
+        stakingToken = IERC20(_token);
+        interestRate = _interestRate;
+        compoundInterval = _compoundInterval;
+        admin = msg.sender;
     }
 
-    CONSTRUCTOR
-    -------------------------------------------------------
-    -------------------------------------------------------
-    function _getCollateralValue(uint256 amount) internal view returns (uint256) {
-        -------------------------------------------------------
-    -------------------------------------------------------
-    function openLoop(uint256 collateralAmount, uint256 loops) external {
-        require(!positions[msg.sender].exists, "Already exists");
-        require(loops > 0 && loops <= 10, "Loops too high");
+    /**
+     * @notice Deposit tokens to start earning looping yield
+     */
+    function deposit(uint256 amount) external {
+        require(amount > 0, "Amount must be > 0");
+        stakingToken.transferFrom(msg.sender, address(this), amount);
 
-        Main leverage loop
-        for (uint256 i = 0; i < loops; i++) {
-            uint256 borrowable = _maxBorrow(currentCollateral) - totalDebt;
-            if (borrowable == 0) break;
+        autoCompound(msg.sender);
 
-            placeholder for real lending pool
-            totalDebt += borrowable;
+        users[msg.sender].deposited += amount;
+        emit Deposited(msg.sender, amount);
+    }
 
-            *DEX logic not included; assume swap executed offchain*
-            uint256 extraCollateral = borrowable / 2; -------------------------------------------------------
-    -------------------------------------------------------
-    function boostLoop(uint256 extraCollateral, uint256 moreLoops) external positionExists {
-        require(moreLoops > 0 && moreLoops <= 10, "Bad loops");
+    /**
+     * @notice Internal auto-compounding logic to loop rewards based on time
+     */
+    function autoCompound(address user) internal {
+        UserInfo storage info = users[user];
 
-        collateralToken.transferFrom(msg.sender, address(this), extraCollateral);
-
-        Position storage p = positions[msg.sender];
-        p.collateral += extraCollateral;
-
-        uint256 totalDebt = p.debt;
-
-        placeholder
-            p.collateral += extraCol;
+        if (info.deposited == 0 || block.timestamp < info.lastCompound + compoundInterval) {
+            // Not eligible for compounding yet
+            info.lastCompound = block.timestamp;
+            return;
         }
 
-        p.debt = totalDebt;
-        p.loopCount += moreLoops;
+        uint256 cycles = (block.timestamp - info.lastCompound) / compoundInterval;
+        uint256 reward;
 
-        emit LoopExpanded(msg.sender, p.collateral, moreLoops);
+        for (uint256 i = 0; i < cycles; i++) {
+            reward = (info.deposited * interestRate) / 10000;
+            info.deposited += reward;
+        }
+
+        info.lastCompound = block.timestamp;
+        emit Compounded(user, reward);
     }
 
-    EXIT LOOP
-    Repay debt (assume repaid separately)
-        -------------------------------------------------------
-    -------------------------------------------------------
-    function liquidate(address user) external {
-        require(_healthFactor(user) < LIQUIDATION_THRESHOLD, "Healthy");
+    /**
+     * @notice Withdraw some or full amount including compounded yield
+     */
+    function withdraw(uint256 amount) external {
+        autoCompound(msg.sender);
+        require(users[msg.sender].deposited >= amount, "Insufficient balance");
 
-        Position memory p = positions[user];
-        require(p.exists, "No position");
+        users[msg.sender].deposited -= amount;
+        stakingToken.transfer(msg.sender, amount);
 
-        uint256 seizeCollateral = (p.collateral * 90_000) / PRECISION; Liquidator receives bonus collateral
-        collateralToken.transfer(msg.sender, seizeCollateral);
+        emit Withdrawn(msg.sender, amount);
+    }
 
-        -------------------------------------------------------
-    -------------------------------------------------------
-    function updateOracle(address newOracle) external onlyOwner {
-        oracle = IPriceOracle(newOracle);
-        emit OracleUpdated(newOracle);
+    /**
+     * @notice Admin can update interest rate
+     */
+    function updateInterestRate(uint256 newRate) external onlyAdmin {
+        interestRate = newRate;
+        emit UpdatedIR(newRate);
+    }
+
+    /**
+     * @notice Get rewards pending for compounding (view only)
+     */
+    function previewReward(address user) external view returns (uint256) {
+        UserInfo memory info = users[user];
+        if (info.deposited == 0 || block.timestamp < info.lastCompound + compoundInterval) {
+            return 0;
+        }
+        uint256 cycles = (block.timestamp - info.lastCompound) / compoundInterval;
+        uint256 reward = (info.deposited * interestRate) / 10000 * cycles;
+        return reward;
     }
 }
-// 
-Contract End
-// 
